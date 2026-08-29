@@ -5,7 +5,7 @@ const cors = require('cors');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
+// Middleware Setup
 app.use(cors());
 app.use(express.json());
 
@@ -24,14 +24,14 @@ function hashSHA256(value) {
 app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'online',
-    service: 'otterwatch-capi-sync',
+    service: 'meta-crm-capi',
     version: '1.0.0',
     timestamp: new Date().toISOString()
   });
 });
 
 // ------------------------------------------------------------------
-// 2. MAIN CAPI TELEMETRY ROUTE (Webhook & Ingestion)
+// 2. MAIN TELEMETRY INGESTION ROUTE
 // ------------------------------------------------------------------
 app.post('/events', async (req, res) => {
   try {
@@ -45,7 +45,7 @@ app.post('/events', async (req, res) => {
       });
     }
 
-    // Process & Hash User Data (In-Memory Processing)
+    // Process & Hash User Data
     const userData = {
       em: email ? [hashSHA256(email)] : undefined,
       ph: phone ? [hashSHA256(phone)] : undefined,
@@ -53,7 +53,7 @@ app.post('/events', async (req, res) => {
       ln: last_name ? [hashSHA256(last_name)] : undefined,
     };
 
-    // Construct Payload for Meta CAPI
+    // Construct Telemetry Payload
     const payload = {
       data: [
         {
@@ -67,16 +67,16 @@ app.post('/events', async (req, res) => {
       ]
     };
 
-    // Return instant success response (Stateless & Fast Execution)
+    // Immediate Acknowledgment Output
     return res.status(200).json({
       success: true,
-      message: 'Event processed and queued for CAPI egress',
+      message: 'Event processed and queued for egress',
       event_id: payload.data[0].event_id,
       timestamp: new Date().toISOString()
     });
 
   } catch (error) {
-    console.error('CAPI Sync Error:', error.message);
+    console.error('Processing Error:', error.message);
     return res.status(500).json({
       error: 'Internal Server Error',
       message: 'Failed to process telemetry event'
@@ -85,16 +85,16 @@ app.post('/events', async (req, res) => {
 });
 
 // ------------------------------------------------------------------
-// 3. FALLBACK CATCH-ALL ROUTE
+// 3. FALLBACK ROUTE
 // ------------------------------------------------------------------
 app.use((req, res) => {
   res.status(404).json({
     error: 'Not Found',
-    message: `Route ${req.originalUrl} does not exist on this microservice.`
+    message: `Route ${req.originalUrl} does not exist on this service.`
   });
 });
 
 // Start Server
 app.listen(PORT, () => {
-  console.log(`[Otterwatch] Engine 01 (CAPI Sync) running on port ${PORT}`);
+  console.log(`[Otterwatch Engine] Server running on port ${PORT}`);
 });
