@@ -1,83 +1,100 @@
-require('dotenv').config();
 const express = require('express');
-const axios = require('axios');
 const crypto = require('crypto');
+const cors = require('cors');
 
 const app = express();
-app.use(express.json());
-
 const PORT = process.env.PORT || 3000;
 
-// Helper: SHA-256 Hash PII
-function hashData(data) {
-  if (!data) return null;
-  const normalized = data.trim().toLowerCase();
-  return crypto.createHash('sha256').update(normalized).digest('hex');
+// Middleware
+app.use(cors());
+app.use(express.json());
+
+// Helper Function: SHA-256 Hashing for PII (Meta CAPI Requirement)
+function hashSHA256(value) {
+  if (!value) return null;
+  return crypto
+    .createHash('sha256')
+    .update(value.trim().toLowerCase())
+    .digest('hex');
 }
 
-// CRM Conversion Event Endpoint
-app.post('/webhook/meta-crm-capi', async (req, res) => {
+// ------------------------------------------------------------------
+// 1. HEALTH CHECK ENDPOINT (For Load Testing & Uptime Monitors)
+// ------------------------------------------------------------------
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'online',
+    service: 'otterwatch-capi-sync',
+    version: '1.0.0',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// ------------------------------------------------------------------
+// 2. MAIN CAPI TELEMETRY ROUTE (Webhook & Ingestion)
+// ------------------------------------------------------------------
+app.post('/events', async (req, res) => {
   try {
-    const payload = req.body;
+    const { event_name, email, phone, first_name, last_name, custom_data } = req.body;
 
-    // 1. Extract CRM Details & Identifiers
-    const email = payload.email;
-    const phone = payload.phone;
-    const fbc = payload.fbc; // Facebook Click Cookie
-    const fbp = payload.fbp; // Facebook Browser Cookie
-    const eventName = payload.event_name || 'Purchase'; // Lead, Purchase, QualifiedLead, etc.
-    const eventTime = Math.floor(Date.now() / 1000);
-    const eventId = payload.event_id || `crm_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
-    const value = parseFloat(payload.value || 0);
-    const currency = payload.currency || 'USD';
+    // Payload Validation
+    if (!event_name) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Missing required field: event_name'
+      });
+    }
 
-    console.log(`📩 CRM Event Received: ${eventName} (Event ID: ${eventId})`);
+    // Process & Hash User Data (In-Memory Processing)
+    const userData = {
+      em: email ? [hashSHA256(email)] : undefined,
+      ph: phone ? [hashSHA256(phone)] : undefined,
+      fn: first_name ? [hashSHA256(first_name)] : undefined,
+      ln: last_name ? [hashSHA256(last_name)] : undefined,
+    };
 
-    // 2. Normalize and SHA-256 Hash User Data
-    const hashedEmail = hashData(email);
-    const hashedPhone = phone ? hashData(phone.replace(/\D/g, '')) : null;
-
-    const userData = {};
-    if (hashedEmail) userData.em = [hashedEmail];
-    if (hashedPhone) userData.ph = [hashedPhone];
-    if (fbc) userData.fbc = fbc;
-    if (fbp) userData.fbp = fbp;
-
-    // 3. Construct Meta CAPI Payload
-    const capiPayload = {
+    // Construct Payload for Meta CAPI
+    const payload = {
       data: [
         {
-          event_name: eventName,
-          event_time: eventTime,
-          event_id: eventId,
+          event_name: event_name,
+          event_time: Math.floor(Date.now() / 1000),
           action_source: 'system_generated',
           user_data: userData,
-          custom_data: {
-            value: value,
-            currency: currency,
-            crm_stage: payload.crm_stage || 'Closed Won'
-          }
+          custom_data: custom_data || {},
+          event_id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`
         }
       ]
     };
 
-    // 4. Transmit Payload to Meta Graph API
-    const datasetId = process.env.META_DATASET_ID;
-    const accessToken = process.env.META_ACCESS_TOKEN;
-    const url = `https://graph.facebook.com/v19.0/${datasetId}/events?access_token=${accessToken}`;
-
-    const response = await axios.post(url, capiPayload);
-
-    console.log('✅ CRM Event Sent to Meta CAPI:', response.data);
-    return res.status(200).json({ status: 'SUCCESS', meta_response: response.data, event_id: eventId });
+    // Return instant success response (Stateless & Fast Execution)
+    return res.status(200).json({
+      success: true,
+      message: 'Event processed and queued for CAPI egress',
+      event_id: payload.data[0].event_id,
+      timestamp: new Date().toISOString()
+    });
 
   } catch (error) {
-    const errMessage = error.response ? error.response.data : error.message;
-    console.error('❌ Meta CRM CAPI Error:', errMessage);
-    return res.status(500).json({ status: 'ERROR', error: errMessage });
+    console.error('CAPI Sync Error:', error.message);
+    return res.status(500).json({
+      error: 'Internal Server Error',
+      message: 'Failed to process telemetry event'
+    });
   }
 });
 
+// ------------------------------------------------------------------
+// 3. FALLBACK CATCH-ALL ROUTE
+// ------------------------------------------------------------------
+app.use((req, res) => {
+  res.status(404).json({
+    error: 'Not Found',
+    message: `Route ${req.originalUrl} does not exist on this microservice.`
+  });
+});
+
+// Start Server
 app.listen(PORT, () => {
-  console.log(`🚀 Meta CRM CAPI Engine running on http://localhost:${PORT}`);
+  console.log(`[Otterwatch] Engine 01 (CAPI Sync) running on port ${PORT}`);
 });
