@@ -1,4 +1,4 @@
-cconst express = require('express');
+const express = require('express');
 const crypto = require('crypto');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
