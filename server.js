@@ -1,17 +1,18 @@
-const express = require('express');
+cconst express = require('express');
 const crypto = require('crypto');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+
+// Initialize Stripe with fallback to prevent initialization crash
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Initialize Supabase Client
-const supabase = createClient(
-  process.env.SUPABASE_URL || '',
-  process.env.SUPABASE_SERVICE_ROLE_KEY || ''
-);
+// Initialize Supabase Client with fallbacks to prevent empty-string validation errors
+const supabaseUrl = process.env.SUPABASE_URL || 'https://placeholder.supabase.co';
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || 'placeholder_key';
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 // Global Middleware
 app.use(cors());
@@ -24,7 +25,8 @@ app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), async (r
   let event;
 
   try {
-    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET || 'whsec_placeholder';
+    event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
   } catch (err) {
     console.error(`Webhook Signature Verification Error: ${err.message}`);
     return res.status(400).send(`Webhook Error: ${err.message}`);
@@ -104,7 +106,7 @@ app.post('/events', async (req, res) => {
       });
     }
 
-    // Optional: Enforce Monthly Usage Caps via Supabase RPC
+    // Enforce Monthly Usage Caps via Supabase RPC
     if (tenant_id) {
       const { data: allowed, error } = await supabase.rpc('increment_event_usage', {
         target_tenant_id: tenant_id,
