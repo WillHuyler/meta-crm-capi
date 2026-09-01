@@ -1,12 +1,71 @@
 const express = require('express');
 const crypto = require('crypto');
 const cors = require('cors');
+const { createClient } = require('@supabase/supabase-js');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware Setup
+// Initialize Supabase Client
+const supabase = createClient(
+  process.env.SUPABASE_URL || '',
+  process.env.SUPABASE_SERVICE_ROLE_KEY || ''
+);
+
+// Global Middleware
 app.use(cors());
+
+// ------------------------------------------------------------------
+// 1. STRIPE WEBHOOK ROUTE (Must be placed BEFORE express.json())
+// ------------------------------------------------------------------
+app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  let event;
+
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.error(`Webhook Signature Verification Error: ${err.message}`);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  const data = event.data.object;
+
+  try {
+    switch (event.type) {
+      case 'customer.subscription.created':
+      case 'customer.subscription.updated':
+        await supabase
+          .from('tenants')
+          .update({
+            subscription_status: data.status === 'active' ? 'active' : 'past_due',
+            stripe_subscription_id: data.id,
+            stripe_price_id: data.items.data[0].price.id,
+            monthly_event_limit: data.items.data[0].price.transform_quantity ? 100000 : 25000
+          })
+          .eq('stripe_customer_id', data.customer);
+        break;
+
+      case 'customer.subscription.deleted':
+        await supabase
+          .from('tenants')
+          .update({ subscription_status: 'suspended' })
+          .eq('stripe_customer_id', data.customer);
+        break;
+
+      default:
+        console.log(`Unhandled Stripe event type: ${event.type}`);
+    }
+  } catch (dbError) {
+    console.error('Database Sync Error:', dbError.message);
+    return res.status(500).json({ error: 'Failed to sync subscription data' });
+  }
+
+  res.json({ received: true });
+});
+
+// JSON Body Parser Middleware (Applies to all routes below)
 app.use(express.json());
 
 // Helper Function: SHA-256 Hashing for PII (Meta CAPI Requirement)
@@ -19,7 +78,7 @@ function hashSHA256(value) {
 }
 
 // ------------------------------------------------------------------
-// 1. HEALTH CHECK ENDPOINT (For Load Testing & Uptime Monitors)
+// 2. HEALTH CHECK ENDPOINT
 // ------------------------------------------------------------------
 app.get('/health', (req, res) => {
   res.status(200).json({
@@ -31,11 +90,11 @@ app.get('/health', (req, res) => {
 });
 
 // ------------------------------------------------------------------
-// 2. MAIN TELEMETRY INGESTION ROUTE
+// 3. MAIN TELEMETRY INGESTION ROUTE
 // ------------------------------------------------------------------
 app.post('/events', async (req, res) => {
   try {
-    const { event_name, email, phone, first_name, last_name, custom_data } = req.body;
+    const { event_name, email, phone, first_name, last_name, custom_data, tenant_id } = req.body;
 
     // Payload Validation
     if (!event_name) {
@@ -43,6 +102,21 @@ app.post('/events', async (req, res) => {
         error: 'Bad Request',
         message: 'Missing required field: event_name'
       });
+    }
+
+    // Optional: Enforce Monthly Usage Caps via Supabase RPC
+    if (tenant_id) {
+      const { data: allowed, error } = await supabase.rpc('increment_event_usage', {
+        target_tenant_id: tenant_id,
+        event_count: 1
+      });
+
+      if (error || !allowed) {
+        return res.status(429).json({
+          error: 'Rate Limit Exceeded',
+          message: 'Monthly event limit reached or subscription inactive.'
+        });
+      }
     }
 
     // Process & Hash User Data
@@ -85,7 +159,7 @@ app.post('/events', async (req, res) => {
 });
 
 // ------------------------------------------------------------------
-// 3. FALLBACK ROUTE
+// 4. FALLBACK ROUTE
 // ------------------------------------------------------------------
 app.use((req, res) => {
   res.status(404).json({
